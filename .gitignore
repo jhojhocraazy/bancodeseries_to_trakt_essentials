@@ -2,3 +2,4 @@ tmdb_api.txt
 phpsessid.txt
 *.csv
 relatorio_execucao_*.txt
+__pycache__/
