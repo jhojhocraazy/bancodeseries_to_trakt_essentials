@@ -3,3 +3,4 @@ phpsessid.txt
 *.csv
 relatorio_execucao_*.txt
 __pycache__/
+*.gz
