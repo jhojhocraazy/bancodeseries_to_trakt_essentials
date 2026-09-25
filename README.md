@@ -124,6 +124,18 @@ Para sair, escolha `0`. A ajuda pode ser aberta com `H` e não inicia uma export
 
 Em grades atrasadas, a linha da série não entra no History para evitar que a plataforma de destino preencha episódios não assistidos.
 
+## Como obter o PHPSESSID
+
+O `PHPSESSID` é o cookie de sessão da sua conta Banco de Séries. Ele não é sua senha e nunca deve ser compartilhado.
+
+1. Faça login em `bancodeseries.com.br` no navegador.
+2. Abra as ferramentas do desenvolvedor (`F12`).
+3. Vá em **Application/Storage → Cookies → bancodeseries.com.br**.
+4. Copie apenas o **valor** do cookie `PHPSESSID`.
+5. Cole o valor quando o programa solicitar.
+
+O arquivo `phpsessid.txt` é ignorado pelo Git. A sessão expira; nesse caso, faça login novamente e repita o procedimento. O passo a passo completo está em [docs/usage.md](docs/usage.md).
+
 ## Arquivos gerados
 
 Os arquivos são gravados na pasta de trabalho atual.

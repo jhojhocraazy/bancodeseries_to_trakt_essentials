@@ -16,6 +16,17 @@ try:
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
     from bs4 import BeautifulSoup
+    from exporters import (
+        COLUNAS_HISTORY,
+        COLUNAS_RATINGS,
+        exportar_trakt,
+        linhas_com_nota as _exportar_linhas_com_nota,
+        linhas_history as _exportar_linhas_history,
+    )
+    from tmdb_client import (
+        buscar_estrutura_tmdb as _tmdb_buscar_estrutura,
+        buscar_fallback_tmdb as _tmdb_buscar_fallback,
+    )
 except ImportError:
     print("Dependências ausentes. Execute: py -m pip install requests beautifulsoup4 rich")
     sys.exit(1)
@@ -26,8 +37,6 @@ RATINGS_FILE = Path("title.ratings.tsv.gz")
 EPISODES_FILE = Path("title.episode.tsv.gz")
 TMDB_API_KEY = ""
 NOME_PRODUTO = "Banco de Séries -> Trakt Essentials"
-COLUNAS_HISTORY = ["imdb_id", "tmdb_id", "type"]
-COLUNAS_RATINGS = ["imdb_id", "tmdb_id", "type", "rating"]
 
 def limpar_tela():
     """Limpa a tela do terminal independentemente do sistema operacional (Windows/Linux/Mac)."""
@@ -203,48 +212,10 @@ def extrair_dados_serie_bds(sessao, serie_id, rastrear_historico):
 
 def buscar_estrutura_tmdb(sessao, imdb_id):
     """
-    Consulta o TMDb usando o IMDb ID. Obtém a contagem de temporadas e itera para extrair
-    os metadados de cada episódio, incluindo a data de exibição (air_date) para o filtro temporal.
+    Função: delegar a consulta de séries ao cliente TMDb.
+    Motivo: manter a integração externa isolada em `tmdb_client.py`.
     """
-    url_find = f"https://api.themoviedb.org/3/find/{imdb_id}"
-    auth_params = {"api_key": TMDB_API_KEY, "external_source": "imdb_id"}
-    resposta_find = sessao.get(url_find, params=auth_params, timeout=15)
-    resposta_find.raise_for_status()
-    res = resposta_find.json().get("tv_results", [])
-    if not res: return None, {}
-        
-    tmdb_id = str(res[0]["id"])
-    resposta_detalhe = sessao.get(
-        f"https://api.themoviedb.org/3/tv/{tmdb_id}",
-        params={"api_key": TMDB_API_KEY}, timeout=15
-    )
-    resposta_detalhe.raise_for_status()
-    total_temporadas = resposta_detalhe.json().get("number_of_seasons", 0)
-    
-    hoje = datetime.now().strftime("%Y-%m-%d")
-    tmdb_struct = {}
-    
-    for s in range(1, total_temporadas + 1):
-        resp_season = sessao.get(
-            f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s}",
-            params={"api_key": TMDB_API_KEY}, timeout=15
-        )
-        if resp_season.status_code == 200:
-            tmdb_struct[s] = []
-            for ep in resp_season.json().get("episodes", []):
-                ep_num = ep.get("episode_number")
-                if ep_num == 0: continue
-                
-                air_date = ep.get("air_date")
-                lancado = bool(air_date and air_date <= hoje)
-                
-                tmdb_struct[s].append({
-                    "episode": ep_num,
-                    "tmdb_id": ep.get("id"),
-                    "air_date": air_date,
-                    "lancado": lancado
-                })
-    return tmdb_id, tmdb_struct
+    return _tmdb_buscar_estrutura(sessao, imdb_id, TMDB_API_KEY)
 
 def resolver_redirecionamento_imdb(imdb_id):
     """
@@ -272,35 +243,17 @@ def resolver_redirecionamento_imdb(imdb_id):
 
 def buscar_fallback_tmdb(sessao, nome_serie):
     """
-    Mecanismo de Contingência 2: Se o ID do IMDb estiver irremediavelmente morto, faz uma busca textual
-    aproximada (Semantic Search) na API do TMDb e resgata o ID Externo da obra encontrada.
+    Função: delegar a busca textual de contingência ao cliente TMDb.
+    Motivo: manter a integração externa e a auditoria de identidade separadas.
     """
-    query = requests.utils.quote(re.sub(r"\(.*?\)", "", nome_serie).strip())
-    try:
-        resposta_busca = sessao.get(
-            f"https://api.themoviedb.org/3/search/tv",
-            params={"api_key": TMDB_API_KEY, "query": query}, timeout=15
-        )
-        resposta_busca.raise_for_status()
-        res = resposta_busca.json().get("results", [])
-        if res:
-            resp_ext = sessao.get(
-                f"https://api.themoviedb.org/3/tv/{str(res[0]['id'])}/external_ids",
-                params={"api_key": TMDB_API_KEY}, timeout=15
-            )
-            if resp_ext.status_code == 200: return resp_ext.json().get("imdb_id")
-    except Exception:
-        return None
+    return _tmdb_buscar_fallback(sessao, nome_serie, TMDB_API_KEY)
 
 def _linhas_history(linhas_exportacao):
-    return [linha for linha in linhas_exportacao if not linha.get("ignorar_no_historico")]
+    return _exportar_linhas_history(linhas_exportacao)
 
 
 def _linhas_com_nota(linhas_exportacao):
-    return [
-        linha for linha in linhas_exportacao
-        if linha.get("rating") not in (None, "")
-    ]
+    return _exportar_linhas_com_nota(linhas_exportacao)
 
 
 def processar_bloco(sessao, obras, regras_confianca, ratings_dict, imdb_struct_db, linhas_csv):
@@ -514,46 +467,11 @@ def confirmar_exportacao(categorias_alvo):
         console.print("[red]Opção inválida. Tente novamente.[/red]")
 
 def _escrever_csv_atomico(destino, fieldnames, linhas):
-    temporario = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", newline="", encoding="utf-8",
-            prefix=f"{destino.name}.", suffix=".part", dir=destino.parent,
-            delete=False,
-        ) as f:
-            temporario = Path(f.name)
-            escritor = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-            escritor.writeheader()
-            escritor.writerows(linhas)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(temporario, destino)
-    except Exception:
-        if temporario is not None:
-            try:
-                temporario.unlink(missing_ok=True)
-            except OSError:
-                pass
-        raise
-
-
-def exportar_trakt(linhas_exportacao, timestamp_arquivo):
-    """Escreve History e Ratings em arquivos temporários e publica atomicamente."""
-    linhas_history = _linhas_history(linhas_exportacao)
-    linhas_com_nota = _linhas_com_nota(linhas_exportacao)
-    nome_arquivo_history = f"exportacao_history_{timestamp_arquivo}.csv"
-    nome_arquivo_ratings = f"exportacao_ratings_{timestamp_arquivo}.csv"
-    if linhas_exportacao:
-        _escrever_csv_atomico(
-            Path(nome_arquivo_history), COLUNAS_HISTORY, linhas_history
-        )
-        if linhas_com_nota:
-            _escrever_csv_atomico(
-                Path(nome_arquivo_ratings),
-                COLUNAS_RATINGS,
-                linhas_com_nota,
-            )
-    return linhas_history, linhas_com_nota, nome_arquivo_history, nome_arquivo_ratings
+    """Função: delegar a escrita atômica de CSV à camada de exportação.
+    Motivo: manter o módulo principal livre de detalhes de sistema de arquivos.
+    """
+    from exporters import escrever_csv_atomico
+    return escrever_csv_atomico(destino, fieldnames, linhas)
 
 
 def main():

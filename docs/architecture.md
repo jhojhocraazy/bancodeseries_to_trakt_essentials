@@ -6,6 +6,15 @@ A aplicação é uma CLI local de exportação. Ela lê o histórico de uma cont
 
 A aplicação não autentica no Trakt e não importa arquivos.
 
+## Módulos
+
+```text
+bancodeseries_to_trakt_essentials.py  -> CLI, extração, regras de consumo e orquestração
+tmdb_client.py                        -> cliente TMDb v3, timeouts e respostas
+identity_matching.py                 -> normalização de títulos e auditoria de fallback
+exporters.py                         -> contratos de colunas e escrita atômica de CSV
+```
+
 ## Fluxo
 
 ```text
