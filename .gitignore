@@ -4,3 +4,11 @@ phpsessid.txt
 relatorio_execucao_*.txt
 __pycache__/
 *.gz
+*.part
+.venv/
+.coverage
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/

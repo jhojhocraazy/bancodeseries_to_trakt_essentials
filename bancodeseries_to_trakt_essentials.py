@@ -4,12 +4,15 @@ import gzip
 import re
 import sys
 import time
+import tempfile
 from datetime import datetime
+from getpass import getpass
 from pathlib import Path
-from rich.console import Console
-from rich.panel import Panel
 
 try:
+    from rich.console import Console
+    from rich.markup import escape
+    from rich.panel import Panel
     import requests
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
@@ -23,10 +26,19 @@ BASE_URL = "https://bancodeseries.com.br"
 RATINGS_FILE = Path("title.ratings.tsv.gz")
 EPISODES_FILE = Path("title.episode.tsv.gz")
 TMDB_API_KEY = ""
+NOME_PRODUTO = "Banco de Séries -> Trakt Essentials"
+COLUNAS_HISTORY = ["imdb_id", "tmdb_id", "type"]
+COLUNAS_RATINGS = ["imdb_id", "tmdb_id", "type", "rating"]
 
 def limpar_tela():
     """Limpa a tela do terminal independentemente do sistema operacional (Windows/Linux/Mac)."""
     os.system('cls' if os.name == 'nt' else 'clear')
+
+def limpar_para_menu():
+    try:
+        limpar_tela()
+    except OSError:
+        pass
 
 def carregar_credencial(nome_arquivo, prompt_msg):
     """
@@ -41,37 +53,55 @@ def carregar_credencial(nome_arquivo, prompt_msg):
             return valor
     
     console.print(f"[yellow]{nome_arquivo} não encontrado ou vazio.[/yellow]")
-    valor = input(f"{prompt_msg}: ").strip()
+    while True:
+        try:
+            valor = getpass(f"{prompt_msg}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("[yellow]Entrada da credencial cancelada.[/yellow]")
+            raise SystemExit(1)
+        if valor:
+            break
+        console.print("[yellow]A credencial não pode ser vazia.[/yellow]")
     caminho.write_text(valor, encoding="utf-8")
     console.print(f"[green]Credencial salva em {nome_arquivo} para execuções futuras.[/green]\n")
     return valor
 
+def _baixar_dataset_imdb(url, destino):
+    temporario = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", prefix=f"{destino.name}.", suffix=".part",
+            dir=destino.parent, delete=False,
+        ) as arquivo:
+            temporario = Path(arquivo.name)
+            resp = requests.get(url, stream=True, timeout=60)
+            resp.raise_for_status()
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    arquivo.write(chunk)
+        with gzip.open(temporario, "rb") as f:
+            for _ in f:
+                pass
+        temporario.replace(destino)
+    except Exception:
+        if temporario is not None:
+            try:
+                temporario.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+
 def carregar_datasets_imdb():
-    """
-    Baixa e indexa os arquivos oficiais do IMDb diretamente na memória RAM.
-    Por que: 
-    1. Evita o problema N+1 no TMDb (fazer uma requisição web para cada episódio para descobrir o ID).
-    2. Burla o WAF (Firewall) da Amazon, não acessando as páginas HTML deles.
-    3. Tempo de descoberta do ID cai de ~1 segundo pela rede para 0.001ms na RAM.
-    """
     url_ratings = "https://datasets.imdbws.com/title.ratings.tsv.gz"
     url_episodes = "https://datasets.imdbws.com/title.episode.tsv.gz"
-    
+
     if not RATINGS_FILE.exists():
         console.print("[cyan]Baixando base de notas oficial do IMDb (~30MB)...[/cyan]")
-        resp = requests.get(url_ratings, stream=True, timeout=60)
-        resp.raise_for_status()
-        with open(RATINGS_FILE, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk: f.write(chunk)
-                
+        _baixar_dataset_imdb(url_ratings, RATINGS_FILE)
+
     if not EPISODES_FILE.exists():
         console.print("[cyan]Baixando topologia oficial do IMDb (~30MB)...[/cyan]")
-        resp = requests.get(url_episodes, stream=True, timeout=60)
-        resp.raise_for_status()
-        with open(EPISODES_FILE, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk: f.write(chunk)
+        _baixar_dataset_imdb(url_episodes, EPISODES_FILE)
 
     ratings_dict = {}
     imdb_struct = {}
@@ -162,14 +192,21 @@ def extrair_dados_serie_bds(sessao, serie_id, rastrear_historico):
         for painel in sopa.find_all("div", class_=lambda c: c and "panel-seasons" in c):
             div_rate = painel.find("div", class_="rate")
             temporada = div_rate.get("data-season", "") if div_rate else ""
-            if not temporada or int(temporada) == 0: continue
+            if not temporada:
+                continue
+            try:
+                temporada_int = int(temporada)
+            except ValueError:
+                continue
+            if temporada_int == 0:
+                continue
             
             if painel.find("img", src=re.compile(r"darkchecked\.png")):
                 tag_b = painel.find("b")
                 if tag_b:
                     match_ep = re.search(r"(\d+)\s*-", tag_b.get_text())
                     if match_ep:
-                        episodios_assistidos.add((int(temporada), int(match_ep.group(1))))
+                        episodios_assistidos.add((temporada_int, int(match_ep.group(1))))
                         
     return imdb_id, episodios_assistidos
 
@@ -178,18 +215,29 @@ def buscar_estrutura_tmdb(sessao, imdb_id):
     Consulta o TMDb usando o IMDb ID. Obtém a contagem de temporadas e itera para extrair
     os metadados de cada episódio, incluindo a data de exibição (air_date) para o filtro temporal.
     """
-    url_find = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={TMDB_API_KEY}&external_source=imdb_id"
-    res = sessao.get(url_find, timeout=15).json().get("tv_results", [])
+    url_find = f"https://api.themoviedb.org/3/find/{imdb_id}"
+    auth_params = {"api_key": TMDB_API_KEY, "external_source": "imdb_id"}
+    resposta_find = sessao.get(url_find, params=auth_params, timeout=15)
+    resposta_find.raise_for_status()
+    res = resposta_find.json().get("tv_results", [])
     if not res: return None, {}
         
     tmdb_id = str(res[0]["id"])
-    total_temporadas = sessao.get(f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={TMDB_API_KEY}", timeout=15).json().get("number_of_seasons", 0)
+    resposta_detalhe = sessao.get(
+        f"https://api.themoviedb.org/3/tv/{tmdb_id}",
+        params={"api_key": TMDB_API_KEY}, timeout=15
+    )
+    resposta_detalhe.raise_for_status()
+    total_temporadas = resposta_detalhe.json().get("number_of_seasons", 0)
     
     hoje = datetime.now().strftime("%Y-%m-%d")
     tmdb_struct = {}
     
     for s in range(1, total_temporadas + 1):
-        resp_season = sessao.get(f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s}?api_key={TMDB_API_KEY}", timeout=15)
+        resp_season = sessao.get(
+            f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s}",
+            params={"api_key": TMDB_API_KEY}, timeout=15
+        )
         if resp_season.status_code == 200:
             tmdb_struct[s] = []
             for ep in resp_season.json().get("episodes", []):
@@ -226,7 +274,9 @@ def resolver_redirecionamento_imdb(imdb_id):
             if tag and "href" in tag.attrs:
                 match = re.search(r"(tt\d+)", tag["href"])
                 if match and match.group(1) != imdb_id: return match.group(1)
-    except: pass
+    except Exception:
+        return imdb_id
+
     return imdb_id
 
 def buscar_fallback_tmdb(sessao, nome_serie):
@@ -236,12 +286,31 @@ def buscar_fallback_tmdb(sessao, nome_serie):
     """
     query = requests.utils.quote(re.sub(r"\(.*?\)", "", nome_serie).strip())
     try:
-        res = sessao.get(f"https://api.themoviedb.org/3/search/tv?api_key={TMDB_API_KEY}&query={query}", timeout=15).json().get("results", [])
+        resposta_busca = sessao.get(
+            f"https://api.themoviedb.org/3/search/tv",
+            params={"api_key": TMDB_API_KEY, "query": query}, timeout=15
+        )
+        resposta_busca.raise_for_status()
+        res = resposta_busca.json().get("results", [])
         if res:
-            resp_ext = sessao.get(f"https://api.themoviedb.org/3/tv/{str(res[0]['id'])}/external_ids?api_key={TMDB_API_KEY}", timeout=15)
+            resp_ext = sessao.get(
+                f"https://api.themoviedb.org/3/tv/{str(res[0]['id'])}/external_ids",
+                params={"api_key": TMDB_API_KEY}, timeout=15
+            )
             if resp_ext.status_code == 200: return resp_ext.json().get("imdb_id")
-    except: pass
-    return None
+    except Exception:
+        return None
+
+def _linhas_history(linhas_exportacao):
+    return [linha for linha in linhas_exportacao if not linha.get("ignorar_no_historico")]
+
+
+def _linhas_com_nota(linhas_exportacao):
+    return [
+        linha for linha in linhas_exportacao
+        if linha.get("rating") not in (None, "")
+    ]
+
 
 def processar_bloco(sessao, obras, regras_confianca, ratings_dict, imdb_struct_db, linhas_csv):
     """
@@ -253,11 +322,12 @@ def processar_bloco(sessao, obras, regras_confianca, ratings_dict, imdb_struct_d
         "episodios_ignorados": 0, "episodios_assistidos": 0, "assimetrias": []
     }
 
-    for obra in obras:
+    total_series = len(obras)
+    for indice, obra in enumerate(obras, start=1):
         try:
             time.sleep(2.5)
             console.print(f"\n[bold magenta]---[/bold magenta]")
-            console.print(f"Série: [bold white]{obra['nome']}[/bold white]")
+            console.print(f"[{indice}/{total_series}] Processando: [bold white]{escape(obra['nome'])}[/bold white]")
             console.print(f"Categoria: {obra['categoria']}")
             
             rastrear_historico = not regras_confianca
@@ -273,7 +343,7 @@ def processar_bloco(sessao, obras, regras_confianca, ratings_dict, imdb_struct_d
             tmdb_id, tmdb_struct = buscar_estrutura_tmdb(sessao, imdb_id)
             if not tmdb_id:
                 novo_imdb = resolver_redirecionamento_imdb(imdb_id)
-                if novo_imdb == imdb_id: 
+                if not novo_imdb or novo_imdb == imdb_id:
                     novo_imdb = buscar_fallback_tmdb(sessao, obra["nome"])
                 if novo_imdb and novo_imdb != imdb_id:
                     imdb_id = novo_imdb
@@ -287,7 +357,7 @@ def processar_bloco(sessao, obras, regras_confianca, ratings_dict, imdb_struct_d
             nota_matriz = f"[bold yellow]{r_info['rating']}[/bold yellow] ({r_info['votes']:,} votos)" if r_info else "[dim]Não encontrada[/dim]"
             
             if imdb_id != imdb_id_bds:
-                console.print(f"[dim]ID Legado BDS: {imdb_id_bds} → Corrigido pelo Fallback[/dim]")
+                console.print(f"[dim]ID Legado BDS: {imdb_id_bds} -> Corrigido pelo Fallback[/dim]")
                 
             console.print(f"IMDb ID Matriz: {imdb_id} | Nota: {nota_matriz}\n")
             
@@ -356,12 +426,14 @@ def processar_bloco(sessao, obras, regras_confianca, ratings_dict, imdb_struct_d
                             "ignorar_no_historico": False
                         })
                         
-                    console.print(f"E{ep['episode']:02d} → TMDb {ep['tmdb_id']} | IMDb: {ep_imdb or 'N/A'} | [yellow]{nota_str}[/yellow] | {status}")
+                    console.print(f"E{ep['episode']:02d} -> TMDb {ep['tmdb_id']} | IMDb: {ep_imdb or 'N/A'} | [yellow]{nota_str}[/yellow] | {status}")
                 console.print("")
                 
         except Exception as e:
-            console.print(f"[bold red]Erro na obra '{obra['nome']}': {e}[/bold red]")
+            console.print(f"[bold red]Erro na obra '{escape(obra['nome'])}': {type(e).__name__}[/bold red]")
             
+    if total_series:
+        console.print(f"[green]Processamento concluído: {total_series}/{total_series} séries.[/green]")
     return metricas_bloco
 
 def exibir_documentacao():
@@ -386,28 +458,27 @@ ou forçando aproximação por nome no TMDb para curar os links quebrados (Fallb
 
 [bold cyan]5. OS ARQUIVOS GERADOS[/bold cyan]
 O roteador exporta dois arquivos propositalmente para o Trakt.tv não misturar lógicas:
-→ [bold white]History.csv[/bold white]: Ignora sua coluna de nota e impede a importação no formato 'show' para grades atrasadas, garantindo que o seu percentual quebrado não atinja acidentalmente o 100%.
-→ [bold white]Ratings.csv[/bold white]: Extrai apenas o que possui nota e credita ao seu perfil oficial."""
+-> [bold white]History.csv[/bold white]: Ignora sua coluna de nota e impede a importação no formato 'show' para grades atrasadas, garantindo que o seu percentual quebrado não atinja acidentalmente o 100%.
+-> [bold white]Ratings.csv[/bold white]: Extrai apenas o que possui nota e credita ao seu perfil oficial."""
     
     limpar_tela()
-    console.print(Panel.fit(doc_texto, title="[bold white]📖 MANUAL DE OPERAÇÃO E ARQUITETURA[/bold white]", border_style="blue"))
+    console.print(Panel.fit(doc_texto, title=f"[bold white]{NOME_PRODUTO} | MANUAL DE OPERAÇÃO[/bold white]", border_style="blue"))
 
 def exibir_menu_e_obter_selecao():
     """Exibe o seletor visual e converte a resposta do usuário nas categorias a serem processadas pelo core."""
-    menu_texto = """[bold cyan]Selecione o bloco para processamento visual:[/bold cyan]
+    menu_texto = """[bold cyan]Qual categoria você deseja exportar?[/bold cyan]
 
-[bold white]1.[/bold white] Ativas em dia
-[bold white]2.[/bold white] Finalizadas Completas
-[bold white]3.[/bold white] Ativas Atrasadas
-[bold white]4.[/bold white] Finalizadas Atrasadas
-[bold white]5.[/bold white] Todas as categorias
+[bold white]1.[/bold white] Ativas em dia (imdb_id, tmdb_id, type) — confiança absoluta
+[bold white]2.[/bold white] Finalizadas Completas (imdb_id, tmdb_id, type) — confiança absoluta
+[bold white]3.[/bold white] Ativas Atrasadas (imdb_id, tmdb_id, type) — auditoria darkchecked.png
+[bold white]4.[/bold white] Finalizadas Atrasadas (imdb_id, tmdb_id, type) — auditoria darkchecked.png
+[bold white]5.[/bold white] Todas as categorias (imdb_id, tmdb_id, type) — auditoria por categoria
 
-[bold white]6.[/bold white] [bold green]📖 Documentação e Como Usar[/bold green]
-
+[bold white]H.[/bold white] Ajuda
 [bold white]0.[/bold white] Sair"""
     
     console.print("\n")
-    console.print(Panel.fit(menu_texto.strip(), title="[bold white]MENU DE OPERAÇÃO[/bold white]", border_style="blue"))
+    console.print(Panel.fit(menu_texto.strip(), title=f"[bold white]{NOME_PRODUTO} | MENU DE EXPORTAÇÃO[/bold white]", border_style="blue"))
     
     opcoes_map = {
         "1": ["Ativas em dia"],
@@ -415,16 +486,84 @@ def exibir_menu_e_obter_selecao():
         "3": ["Ativas Atrasadas"],
         "4": ["Finalizadas Atrasadas"],
         "5": ["Ativas em dia", "Finalizadas Completas", "Ativas Atrasadas", "Finalizadas Atrasadas"],
+        "H": "DOC",
+        "h": "DOC",
         "6": "DOC"
     }
     
     while True:
-        escolha = input("\nDigite o número da opção desejada: ").strip()
+        escolha = input("\nDigite a opção desejada: ").strip()
         if escolha == "0":
             sys.exit(0)
         if escolha in opcoes_map:
             return opcoes_map[escolha]
         console.print("[red]Opção inválida. Tente novamente.[/red]")
+
+def confirmar_exportacao(categorias_alvo):
+    """Mostra o contrato da operação e exige confirmação antes da coleta."""
+    categorias = ", ".join(categorias_alvo)
+    console.print(Panel.fit(
+        "[bold]Categoria(s):[/bold] " + categorias + "\n"
+        "[bold]History:[/bold] " + ", ".join(COLUNAS_HISTORY) + "\n"
+        "[bold]Ratings:[/bold] " + ", ".join(COLUNAS_RATINGS) + "\n\n"
+        "Episódios futuros serão ignorados.\n"
+        "Ratings conterá somente registros com nota disponível.\n"
+        "A importação para o Trakt é manual.",
+        title="[bold white]CONFIRMAR EXPORTAÇÃO[/bold white]", border_style="blue"
+    ))
+    while True:
+        escolha = input("\nDeseja iniciar? [1] Sim  [2] Voltar  [0] Cancelar: ").strip()
+        if escolha == "1":
+            return True
+        if escolha == "2":
+            return False
+        if escolha == "0":
+            console.print("[yellow]Exportação cancelada.[/yellow]")
+            return False
+        console.print("[red]Opção inválida. Tente novamente.[/red]")
+
+def _escrever_csv_atomico(destino, fieldnames, linhas):
+    temporario = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", newline="", encoding="utf-8",
+            prefix=f"{destino.name}.", suffix=".part", dir=destino.parent,
+            delete=False,
+        ) as f:
+            temporario = Path(f.name)
+            escritor = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            escritor.writeheader()
+            escritor.writerows(linhas)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporario, destino)
+    except Exception:
+        if temporario is not None:
+            try:
+                temporario.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+
+
+def exportar_trakt(linhas_exportacao, timestamp_arquivo):
+    """Escreve History e Ratings em arquivos temporários e publica atomicamente."""
+    linhas_history = _linhas_history(linhas_exportacao)
+    linhas_com_nota = _linhas_com_nota(linhas_exportacao)
+    nome_arquivo_history = f"exportacao_history_{timestamp_arquivo}.csv"
+    nome_arquivo_ratings = f"exportacao_ratings_{timestamp_arquivo}.csv"
+    if linhas_exportacao:
+        _escrever_csv_atomico(
+            Path(nome_arquivo_history), COLUNAS_HISTORY, linhas_history
+        )
+        if linhas_com_nota:
+            _escrever_csv_atomico(
+                Path(nome_arquivo_ratings),
+                COLUNAS_RATINGS,
+                linhas_com_nota,
+            )
+    return linhas_history, linhas_com_nota, nome_arquivo_history, nome_arquivo_ratings
+
 
 def main():
     limpar_tela()
@@ -446,7 +585,7 @@ def main():
     
     while True:
         if not primeira_execucao:
-            limpar_tela()
+            limpar_para_menu()
         primeira_execucao = False
         
         selecao = exibir_menu_e_obter_selecao()
@@ -457,6 +596,8 @@ def main():
             continue
             
         categorias_alvo = selecao
+        if not confirmar_exportacao(categorias_alvo):
+            continue
         
         console.print(f"\n[cyan]Varrendo interface do Banco de Séries...[/cyan]")
         try:
@@ -514,28 +655,14 @@ Episódios Marcados como Assistidos: [bold white]{metricas_globais['episodios_as
             for i, serie in enumerate(metricas_globais['assimetrias'], 1):
                 relatorio_texto += f"{i}. {serie['nome']} (IMDb: {serie['imdb_id']})\n"
         else:
-            relatorio_texto += "\n[bold green][✓] Nenhuma assimetria estrutural detectada.[/bold green]\n"
+            relatorio_texto += "\n[bold green][[OK]] Nenhuma assimetria estrutural detectada.[/bold green]\n"
 
         if linhas_exportacao:
-            linhas_history = [linha for linha in linhas_exportacao if not linha.get("ignorar_no_historico")]
-            nome_arquivo_history = f"exportacao_history_{timestamp_arquivo}.csv"
-            with open(nome_arquivo_history, mode='w', newline='', encoding='utf-8') as f:
-                escritor_history = csv.DictWriter(f, fieldnames=["imdb_id", "tmdb_id", "type"], extrasaction='ignore')
-                escritor_history.writeheader()
-                escritor_history.writerows(linhas_history)
-                
-            nome_arquivo_ratings = f"exportacao_ratings_{timestamp_arquivo}.csv"
-            linhas_com_nota = [linha for linha in linhas_exportacao if linha.get("rating")]
+            linhas_history, linhas_com_nota, nome_arquivo_history, nome_arquivo_ratings = exportar_trakt(linhas_exportacao, timestamp_arquivo)
+            relatorio_texto += "\n[bold green][[OK]] Arquivos de exportação gerados:[/bold green]\n"
+            relatorio_texto += f"    -> {nome_arquivo_history} ([bold white]{len(linhas_history)}[/bold white] check-ins)\n"
             if linhas_com_nota:
-                with open(nome_arquivo_ratings, mode='w', newline='', encoding='utf-8') as f:
-                    escritor_ratings = csv.DictWriter(f, fieldnames=["imdb_id", "tmdb_id", "type", "rating"], extrasaction='ignore')
-                    escritor_ratings.writeheader()
-                    escritor_ratings.writerows(linhas_com_nota)
-            
-            relatorio_texto += "\n[bold green][✓] Arquivos de exportação gerados:[/bold green]\n"
-            relatorio_texto += f"    → {nome_arquivo_history} ([bold white]{len(linhas_history)}[/bold white] check-ins)\n"
-            if linhas_com_nota:
-                relatorio_texto += f"    → {nome_arquivo_ratings} ([bold white]{len(linhas_com_nota)}[/bold white] avaliações)\n"
+                relatorio_texto += f"    -> {nome_arquivo_ratings} ([bold white]{len(linhas_com_nota)}[/bold white] avaliações)\n"
 
         # GRAVAÇÃO DO LOG EM TEXTO PURO
         nome_arquivo_log = f"relatorio_execucao_{timestamp_arquivo}.txt"
@@ -545,7 +672,7 @@ Episódios Marcados como Assistidos: [bold white]{metricas_globais['episodios_as
             f.write("=== RELATORIO OPERACIONAL DE EXPORTACAO ===\n")
             f.write(relatorio_limpo)
             
-        relatorio_texto += f"\n[bold green][✓] Log salvo para consulta:[/bold green] {nome_arquivo_log}\n"
+        relatorio_texto += f"\n[bold green][[OK]] Log salvo para consulta:[/bold green] {nome_arquivo_log}\n"
 
         console.print("\n")
         console.print(Panel.fit(relatorio_texto.strip(), title="[bold white]RELATÓRIO OPERACIONAL DE EXPORTAÇÃO[/bold white]", border_style="blue"))
