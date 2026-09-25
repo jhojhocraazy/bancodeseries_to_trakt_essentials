@@ -4,8 +4,8 @@
 
 - `tmdb_api.txt` e `phpsessid.txt` são locais e ignorados pelo Git.
 - Nunca reproduza o conteúdo dessas arquivos em logs, relatórios, issues ou respostas.
-- Credenciais são digitadas com entrada mascarada.
-- Uma credencial vazia não é salva.
+- Credenciais são solicitadas por prompt interativo e gravadas apenas em arquivos locais ignorados.
+- O isolamento das credenciais é feito pelo `.gitignore` e pela ausência de leitura dessas arquivos em testes.
 
 ## Artefatos
 

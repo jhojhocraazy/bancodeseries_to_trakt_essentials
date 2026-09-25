@@ -6,7 +6,6 @@ import sys
 import time
 import tempfile
 from datetime import datetime
-from getpass import getpass
 from pathlib import Path
 
 try:
@@ -42,26 +41,18 @@ def limpar_para_menu():
 
 def carregar_credencial(nome_arquivo, prompt_msg):
     """
-    Tenta ler uma credencial (API Key ou Sessão) de um arquivo de texto local.
-    Por que: Evita que o usuário precise digitar tokens gigantes a cada execução.
-    Se o arquivo não existir, solicita via input e o cria automaticamente para as próximas vezes.
+    Função: Lidar com a persistência de chaves de API e sessões.
+    Motivo: Evita o recadastramento manual a cada execução. Grava um arquivo de texto local
+    que deve ser isolado no .gitignore para impedir vazamentos de segurança no GitHub.
     """
     caminho = Path(nome_arquivo)
     if caminho.exists():
         valor = caminho.read_text(encoding="utf-8").strip()
         if valor:
             return valor
-    
+
     console.print(f"[yellow]{nome_arquivo} não encontrado ou vazio.[/yellow]")
-    while True:
-        try:
-            valor = getpass(f"{prompt_msg}: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            console.print("[yellow]Entrada da credencial cancelada.[/yellow]")
-            raise SystemExit(1)
-        if valor:
-            break
-        console.print("[yellow]A credencial não pode ser vazia.[/yellow]")
+    valor = input(f"{prompt_msg}: ").strip()
     caminho.write_text(valor, encoding="utf-8")
     console.print(f"[green]Credencial salva em {nome_arquivo} para execuções futuras.[/green]\n")
     return valor

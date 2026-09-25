@@ -40,20 +40,12 @@ class TestStartupOffline(unittest.TestCase):
             )
             self.assertIn("User-Agent", session.headers.update.call_args[0][0])
 
-    def test_credential_prompt_cancellation_exits_cleanly(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "tmdb_api.txt"
-            with patch.object(etl, "console"), patch.object(etl, "getpass", side_effect=EOFError):
-                with self.assertRaises(SystemExit) as context:
-                    etl.carregar_credencial(str(path), "prompt")
-            self.assertEqual(context.exception.code, 1)
-            self.assertFalse(path.exists())
-
+    def test_existing_credential_is_reused_without_prompt(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "tmdb_api.txt"
             path.write_text("  fake-key \n", encoding="utf-8")
             modified = path.stat().st_mtime_ns
-            with patch.object(etl, "console"), patch.object(etl, "getpass") as prompt:
+            with patch.object(etl, "console"), patch("builtins.input") as prompt:
                 self.assertEqual(etl.carregar_credencial(str(path), "prompt"), "fake-key")
             prompt.assert_not_called()
             self.assertEqual(path.stat().st_mtime_ns, modified)

@@ -22,8 +22,8 @@ class FakeResponse:
 
 
 class TestHardening(unittest.TestCase):
-    @patch.object(etl, "getpass", side_effect=["", "valor-secreto"])
-    def test_empty_credential_is_not_persisted(self, _getpass):
+    @patch("builtins.input", return_value="valor-secreto")
+    def test_credential_is_persisted_after_visible_prompt(self, _input):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "credencial.txt"
             valor = etl.carregar_credencial(str(path), "Credencial")

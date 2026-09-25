@@ -146,7 +146,7 @@ History mantém o cabeçalho `imdb_id,tmdb_id,type` e Ratings mantém `imdb_id,t
 ## Segurança e privacidade
 
 - `tmdb_api.txt` e `phpsessid.txt` são locais e ignorados pelo Git.
-- Credenciais são digitadas com entrada mascarada e nunca são exibidas.
+- Credenciais são solicitadas por prompt interativo e salvas somente em arquivos locais ignorados pelo Git.
 - Erros de rede não imprimem URLs com a chave da TMDb.
 - CSVs, relatórios, datasets e temporários são ignorados pelo Git.
 - Não coloque API keys, exports ou relatórios em issues públicas.
