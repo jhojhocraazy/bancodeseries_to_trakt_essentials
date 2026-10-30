@@ -2,7 +2,7 @@
 
 ## Antes de alterar
 
-Leia `AGENT.md`, os agente relevantes e `docs/export-contracts.md`.
+Leia `AGENTS.md`, os agentes relevantes e `docs/export-contracts.md`.
 
 ## Regras
 
